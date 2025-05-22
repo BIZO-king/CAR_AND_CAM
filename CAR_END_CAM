@@ -1,0 +1,667 @@
+
+#include "esp_camera.h"
+#include "img_converters.h"
+#include "fb_gfx.h"
+#include "Arduino.h"
+#include <WebSocketsServer.h>
+#include <WebServer.h>
+#include <WiFi.h>
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
+#include <DNSServer.h>
+
+
+const char* ssid = "cam car";
+const char* password = "";
+
+  
+const int AIN1 = 12;  // מנוע ימין - כיוון 1
+const int AIN2 = 13;  // מנוע ימין - כיוון 2
+const int BIN1 = 14;  // מנוע שמאל - כיוון 1
+const int BIN2 = 15; // מנוע שמאל - כיוון 2
+
+// מהירות ברירת מחדל (0-255)
+int speed = 30;
+
+
+DNSServer dnsServer;
+// מערך שמכיל את מצבי המקשים
+// מיקומים: 0-W, 1-A, 2-S, 3-D, 4-E, 5-Space
+uint8_t keyStates[6] = {0, 0, 0, 0, 0, 0};
+
+int getKeyIndex(char key) {
+  switch (key) {
+    case 'w': return 0;
+    case 'a': return 1;
+    case 's': return 2;
+    case 'd': return 3;
+    case 'e': return 4;
+    case ' ': return 5;
+    default: return -1;
+  }
+}
+
+
+
+void handleMovement(uint8_t keyStates[6]) {
+  // שליטה בפין 4 לפי מקש רווח
+  if (keyStates[5] == 1) {
+    digitalWrite(4, HIGH);
+  } else {
+    digitalWrite(4, LOW);
+  }
+
+  // שליטה בפין 2 לפי מקש E
+  if (keyStates[4] == 1) {
+    digitalWrite(2, HIGH);
+  } else {
+    digitalWrite(2, LOW);
+  }
+
+  // תנועה
+  bool w = keyStates[0];
+  bool a = keyStates[1];
+  bool s = keyStates[2];
+  bool d = keyStates[3];
+
+  if (!w && !a && !s && !d) {
+    // כל המקשים משוחררים -> עצירה
+    stop();
+  } else if (w && !a && !s && !d) {
+    // קדימה בלבד
+    forward();
+  } else if (s && !a && !d) {
+    // אחורה בלבד
+    backward();
+  } else if (a && !w) {
+    // פנייה שמאלה )
+    left();
+  } else if (d && !w) {
+    // פנייה ימינה ()
+    right();
+  
+  } else if (d && w) {
+    //  פנייה ימינה קדימה ()
+    ForwardRight();
+  
+  } else if (a && w) {
+    // פנייה שמאלה קדימה ()
+    ForwardLeft();
+}
+}
+
+WebServer server(80);
+WebSocketsServer webSocket = WebSocketsServer(81);
+
+
+
+
+
+
+
+/*
+void stop() {
+  Serial.println("stop");
+  analogWrite(M1_IN1, 0);
+  analogWrite(M1_IN2, 0);
+  analogWrite(M2_IN1, 0);
+  analogWrite(M2_IN2, 0);
+}
+
+void forward() {
+  Serial.println("forward");
+  analogWrite(M1_IN1, 128);
+  analogWrite(M1_IN2, 0);
+  analogWrite(M2_IN1, 128);
+  analogWrite(M2_IN2, 0);
+}
+
+void backward() {
+  Serial.println("backward");
+  analogWrite(M1_IN1, 0);
+  analogWrite(M1_IN2, 128);
+  analogWrite(M2_IN1, 0);
+  analogWrite(M2_IN2, 128);
+}
+
+void left() {
+  Serial.println("left");
+  digitalWrite(M1_IN1, 0);
+  analogWrite(M1_IN2, 128); // שמאל אחורה
+  analogWrite(M2_IN1, 128); // ימין קדימה
+  digitalWrite(M2_IN2, 0);
+}
+
+void right() {
+  Serial.println("right");
+  analogWrite(M1_IN1, 128); // שמאל קדימה
+  digitalWrite(M1_IN2, 0);
+  digitalWrite(M2_IN1, 0);
+  analogWrite(M2_IN2, 128); // ימין אחורה
+}
+*/
+// פונקציות שליטה
+
+void forward() {
+  analogWrite(AIN1, speed);
+  analogWrite(AIN2, 0);
+  analogWrite(BIN1, speed);
+  analogWrite(BIN2, 0);
+}
+
+void backward() {
+  analogWrite(AIN1, 0);
+  analogWrite(AIN2, speed);
+  analogWrite(BIN1, 0);
+  analogWrite(BIN2, speed);
+}
+
+void right() {
+  analogWrite(AIN1, 80);
+  analogWrite(AIN2, 0);
+  analogWrite(BIN1, 0);
+  analogWrite(BIN2, 80);
+}
+
+void left() {
+  analogWrite(AIN1, 0);
+  analogWrite(AIN2, 80);
+  analogWrite(BIN1, 80);
+  analogWrite(BIN2, 0);
+}
+
+void ForwardRight() {
+  analogWrite(AIN1, speed);
+  analogWrite(AIN2, 0);
+  analogWrite(BIN1, speed / 2);
+  analogWrite(BIN2, 0);
+}
+
+void ForwardLeft() {
+  analogWrite(AIN1, speed / 2);
+  analogWrite(AIN2, 0);
+  analogWrite(BIN1, speed);
+  analogWrite(BIN2, 0);
+}
+
+void stop() {
+  analogWrite(AIN1, 0);
+  analogWrite(AIN2, 0);
+  analogWrite(BIN1, 0);
+  analogWrite(BIN2, 0);
+}
+
+
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  switch (type) {
+    case WStype_CONNECTED:
+      Serial.printf("[%u] Connected\n", num);
+      break;
+
+    case WStype_DISCONNECTED:
+      Serial.printf("[%u] Disconnected\n", num);
+      stop();
+      break;
+
+  
+
+    case WStype_TEXT: {
+      if (length < 2) return;
+
+      char key = (char)payload[0];
+      char stateChar = (char)payload[1];
+
+      if (key == 'v') {
+        // קבלת ערך מהירות חדש
+        int value = atoi((const char*)(payload + 1));
+        speed = value;
+        Serial.printf("Speed updated: %d\n", speed);
+        break;
+      }
+
+      int index = getKeyIndex(key);
+      if (index >= 0) {
+        keyStates[index] = (stateChar == '1') ? 1 : 0;
+        //Serial.printf("Key %c -> State %d\n", key, keyStates[index]);
+        handleMovement(keyStates);
+      }
+      break;
+    }
+  }
+
+
+
+    
+}
+
+
+
+
+
+
+void handleRoot() {
+    
+    String html = R"=====(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>CAR&CAM</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(to right, #2c3e50, #3498db);
+            color: white;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            padding: 20px;
+            height: 100vh;
+            box-sizing: border-box;
+            overflow: hidden;
+        }
+
+        #keyboard {
+            background-color: rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 16px rgba(0,0,0,0.3);
+            text-align: center;
+        }
+
+        h1 {
+            margin-bottom: 20px;
+        }
+
+        .key-row {
+            display: flex;
+            justify-content: center;
+            margin: 10px 0;
+        }
+
+        .key {
+            width: 60px;
+            height: 60px;
+            margin: 0 10px;
+            border-radius: 6px;
+            background: linear-gradient(to bottom, #f9f9f9, #ccc);
+            border: 1px solid #999;
+            color: #000;
+            font-weight: bold;
+            font-size: 20px;
+            box-shadow: 0 2px 0 #888, inset 0 -2px 3px #eee;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            user-select: none;
+        }
+
+        .key:hover {
+            background: #e6e6e6;
+        }
+
+        .key:active, .key.pressed {
+            box-shadow: inset 0 2px 5px #aaa;
+            background: #bbb;
+        }
+
+        #space {
+            width: 200px;
+            border-radius: 8px;
+        }
+
+        #stream {
+            max-width: 640px;
+            max-height: 480px;
+            margin-left: 30px;
+            border-radius: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+            border: 4px solid white;
+        }
+
+        #speedometer {
+            margin: 30px auto 0;
+            width: 200px;
+            height: 100px;
+            background: #2c3e50;
+            border-radius: 100px 100px 0 0;
+            position: relative;
+            border: 3px solid #888;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #needle {
+            width: 6px;
+            height: 80px;
+            background: #ffffff;
+            border-radius: 3px;
+            position: absolute;
+            bottom: 0;
+            left: 50%;
+            transform-origin: bottom center;
+            transform: rotate(-90deg);
+            transition: transform 0.2s ease;
+            box-shadow: 0 0 8px rgba(255, 255, 255, 0.6);
+        }
+
+        #speed-display {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 22px;
+            font-weight: bold;
+            color: #0f0;
+            text-shadow: 0 0 5px #000;
+        }
+    </style>
+</head>
+<body>
+    <div id="keyboard">
+        <h1>🚗 RC CAR CONTROLLER</h1>
+        <div class="key-row">
+            <div class="key" id="w-key">W</div>
+            <div class="key" id="e-key">E</div>
+        </div>
+        <div class="key-row">
+            <div class="key" id="a-key">A</div>
+            <div class="key" id="s-key">S</div>
+            <div class="key" id="d-key">D</div>
+        </div>
+        <div class="key-row">
+            <div class="key" id="space">SPACE</div>
+        </div>
+        <div id="speedometer">
+            <div id="needle"></div>
+            <div id="speed-display">30</div>
+        </div>
+    </div>
+    <img id="stream" src="" />
+
+    <script>
+    let websocket;
+        let spaceState = 0;
+        let speed = 30;
+
+        const MIN_SPEED = 30;
+        const MAX_SPEED = 255;
+
+        const keys = {
+            'e': document.getElementById('e-key'),
+            'w': document.getElementById('w-key'),
+            'a': document.getElementById('a-key'),
+            's': document.getElementById('s-key'),
+            'd': document.getElementById('d-key'),
+            ' ': document.getElementById('space')
+        };
+
+        const keyStates = {
+            'e': false,
+            'w': false,
+            'a': false,
+            's': false,
+            'd': false
+        };
+
+        const needle = document.getElementById('needle');
+        const speedDisplay = document.getElementById('speed-display');
+
+        function updateNeedle() {
+            const angle = -90 + ((speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED)) * 180;
+            needle.style.transform = `rotate(${angle}deg)`;
+            speedDisplay.textContent = speed;
+        }
+
+        function sendSpeed() {
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                websocket.send('v' + speed);
+            }
+        }
+
+        function connectWebSocket() {
+            const espIP = prompt("IP של ה-ESP32:", "192.168.4.1");
+            if (!espIP) {
+                alert("IP לא תקין");
+                return;
+            }
+
+            websocket = new WebSocket('ws://' + espIP + ':81');
+
+            websocket.onopen = () => console.log("WebSocket מחובר");
+            websocket.onclose = () => {
+                console.log("WebSocket התנתק");
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            websocket.onmessage = (event) => {
+                const img = document.getElementById('stream');
+                const blob = new Blob([event.data], {type: 'image/jpeg'});
+                const url = URL.createObjectURL(blob);
+                img.src = url;
+            };
+
+            const sendKey = (key, state) => {
+                if (websocket.readyState === WebSocket.OPEN) {
+                    websocket.send(key + state);
+                }
+            };
+
+            document.addEventListener('keydown', (event) => {
+                const key = event.key.toLowerCase();
+                if (key === 'arrowup') {
+                    speed = Math.min(speed + 5, MAX_SPEED);
+                    updateNeedle();
+                    sendSpeed();
+                } else if (key === 'arrowdown') {
+                    speed = Math.max(speed - 5, MIN_SPEED);
+                    updateNeedle();
+                    sendSpeed();
+                } else if (key in keyStates && !keyStates[key]) {
+                    keyStates[key] = true;
+                    sendKey(key, '1');
+                    keys[key].classList.add('pressed');
+                } else if (key === ' ') {
+                    event.preventDefault();
+                    spaceState = 1 - spaceState;
+                    sendKey(key, spaceState.toString());
+                    keys[key].classList.toggle('pressed', spaceState === 1);
+                }
+            });
+
+            document.addEventListener('keyup', (event) => {
+                const key = event.key.toLowerCase();
+                if (key in keyStates) {
+                    keyStates[key] = false;
+                    sendKey(key, '0');
+                    keys[key].classList.remove('pressed');
+                }
+            });
+
+            document.getElementById('speedometer').addEventListener('click', (e) => {
+                const rect = e.target.getBoundingClientRect();
+                const centerX = rect.left + rect.width / 2;
+                const x = e.clientX - centerX;
+                const percent = Math.max(0, Math.min(1, (x + 100) / 200));
+                speed = Math.round(MIN_SPEED + percent * (MAX_SPEED - MIN_SPEED));
+                updateNeedle();
+                sendSpeed();
+            });
+
+            for (const key in keys) {
+                const element = keys[key];
+                element.addEventListener('mousedown', () => {
+                    if (key === ' ') {
+                        spaceState = 1 - spaceState;
+                        sendKey(key, spaceState.toString());
+                        element.classList.toggle('pressed', spaceState === 1);
+                    } else {
+                        sendKey(key, '1');
+                        element.classList.add('pressed');
+                    }
+                });
+
+                element.addEventListener('mouseup', () => {
+                    if (key !== ' ') {
+                        sendKey(key, '0');
+                        element.classList.remove('pressed');
+                    }
+                });
+
+                element.addEventListener('touchstart', () => {
+                    if (key === ' ') {
+                        spaceState = 1 - spaceState;
+                        sendKey(key, spaceState.toString());
+                        element.classList.toggle('pressed', spaceState === 1);
+                    } else {
+                        sendKey(key, '1');
+                        element.classList.add('pressed');
+                    }
+                });
+
+                element.addEventListener('touchend', () => {
+                    if (key !== ' ') {
+                        sendKey(key, '0');
+                        element.classList.remove('pressed');
+                    }
+                });
+            }
+        }
+
+        updateNeedle();
+        connectWebSocket();
+    </script>
+</body>
+</html>
+      )=====";
+      server.send(200, "text/html", html);
+}
+
+
+ #define PWDN_GPIO_NUM     32
+  #define RESET_GPIO_NUM    -1
+  #define XCLK_GPIO_NUM     0
+  #define SIOD_GPIO_NUM     26
+  #define SIOC_GPIO_NUM     27
+
+  #define Y9_GPIO_NUM      35
+  #define Y8_GPIO_NUM      34
+  #define Y7_GPIO_NUM      39
+  #define Y6_GPIO_NUM      36
+  #define Y5_GPIO_NUM      21
+  #define Y4_GPIO_NUM      19
+  #define Y3_GPIO_NUM      18
+  #define Y2_GPIO_NUM       5
+  #define VSYNC_GPIO_NUM   25
+  #define HREF_GPIO_NUM    23
+  #define PCLK_GPIO_NUM    22
+
+
+void sendCameraFrame() {
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("Camera capture failed");
+    return;
+  }
+
+  uint8_t *jpg_buf = nullptr;
+  size_t jpg_buf_len = 0;
+  bool converted = false; // Added flag
+
+  
+    jpg_buf = fb->buf;
+    jpg_buf_len = fb->len;
+  
+webSocket.broadcastBIN(jpg_buf, jpg_buf_len);
+  esp_camera_fb_return(fb); // Return the frame immediately
+  fb = nullptr;
+}
+
+
+
+//////////////////////////////////////////////////////////////////////
+void setup() {
+ 
+ WiFi.softAP(ssid, password);
+ 
+  
+  Serial.println(WiFi.softAPIP());
+ /*
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("WiFi connected");
+
+*/
+pinMode(2, OUTPUT);
+pinMode(4, OUTPUT);
+  pinMode(AIN1, OUTPUT);
+  pinMode(AIN2, OUTPUT);
+  pinMode(BIN1, OUTPUT);
+  pinMode(BIN2, OUTPUT);
+ Serial.begin(115200);
+
+server.on("/", handleRoot);
+    server.begin();
+    server.onNotFound(handleRoot);
+    //Serial.println(/n)
+    Serial.println("  HTTP server started");
+
+
+webSocket.begin(); // אתחול שרת WebSocket 
+  webSocket.onEvent(webSocketEvent);
+//Serial.print(WiFi.localIP());
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+
+
+camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG; 
+
+config.frame_size = FRAMESIZE_VGA;
+    config.jpeg_quality = 13;
+    config.fb_count = 3;
+
+esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed with error 0x%x", err);
+    return;
+  }
+
+ dnsServer.start(53, "*", WiFi.softAPIP());  
+}
+////////////////////////////////////////////////////////////
+void loop() {
+
+ server.handleClient();
+ webSocket.loop();
+ sendCameraFrame();
+ 
+}
