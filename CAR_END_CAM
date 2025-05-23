@@ -1,5 +1,5 @@
 
-#include "esp_camera.h"
+//#include "esp_camera.h"
 #include "img_converters.h"
 #include "fb_gfx.h"
 #include "Arduino.h"
